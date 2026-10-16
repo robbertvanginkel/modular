@@ -259,7 +259,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
                 self.max_seq_len,
                 1,
                 out_dim=self.max_seq_len,
-                device=self.device,
+                device=CPU(),
                 dtype=DType.float32,
             )
 
@@ -293,7 +293,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             stop=rope_dim,
             step=2,
             out_dim=dim_2,
-            device=self.device,
+            device=CPU(),
             dtype=DType.float64,
         )
 
@@ -340,10 +340,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
     ) -> tuple[Tensor, Tensor]:
         """Find the correction range for YARN scaling."""
         # Convert to tensors
-        low_rot = F.constant(beta_fast, dtype=DType.float32, device=self.device)
-        high_rot = F.constant(
-            beta_slow, dtype=DType.float32, device=self.device
-        )
+        low_rot = F.constant(beta_fast, dtype=DType.float32, device=CPU())
+        high_rot = F.constant(beta_slow, dtype=DType.float32, device=CPU())
 
         low = F.floor(
             self._yarn_find_correction_dim(
@@ -372,14 +370,10 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         max_pos = F.constant(
             float(max_position_embeddings),
             dtype=DType.float32,
-            device=self.device,
+            device=CPU(),
         )
-        base_tensor = F.constant(
-            float(base), dtype=DType.float32, device=self.device
-        )
-        dim_tensor = F.constant(
-            float(dim), dtype=DType.float32, device=self.device
-        )
+        base_tensor = F.constant(float(base), dtype=DType.float32, device=CPU())
+        dim_tensor = F.constant(float(dim), dtype=DType.float32, device=CPU())
 
         return (dim_tensor * F.log(max_pos / (num_rotations * 2 * math.pi))) / (
             2 * F.log(base_tensor)
@@ -393,13 +387,13 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         diff = max_val - min_val
         diff = F.where(
             diff == 0,
-            F.constant(0.001, dtype=DType.float32, device=self.device),
+            F.constant(0.001, dtype=DType.float32, device=CPU()),
             diff,
         )
 
         linear_func = (
             F.arange(
-                0, dim, 1, out_dim=dim, device=self.device, dtype=DType.int64
+                0, dim, 1, out_dim=dim, device=CPU(), dtype=DType.int64
             ).cast(DType.float32)
             - min_val
         ) / diff

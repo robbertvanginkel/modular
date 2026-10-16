@@ -112,6 +112,7 @@ modular_eager_py_test(
         "//max/python/max/experimental",
         "//max/python/max/experimental/nn",
         "//max/python/max/graph",
+        "//max/python/max/nn",
         requirement("numpy"),
         requirement("torch"),
     ],
