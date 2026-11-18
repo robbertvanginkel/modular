@@ -96,6 +96,44 @@ ReshapeIndexOp reshapeOnFusedInput(Block &srcBody, BlockArgument fusionArg) {
   return found;
 }
 
+// Whether every vector the producer's kernel hands its epilogue stays within
+// one innermost row of the consumer once `reshape` moves onto the store index.
+// The kernel calls the epilogue on runs of its own innermost row, at a width of
+// its choosing; such a run stays in one consumer row when producer rows nest in
+// consumer rows, i.e. the consumer's innermost extent is a multiple of the
+// producer's. Only static extents prove it: two dynamic dims are not known
+// equal.
+//
+//   [8, 8]  -> [64]       yes  (64 % 8 == 0)
+//   [8, 25] -> [8, 5, 5]  no   (a run of 25 spans five rows of 5)
+//   [M, N]  -> [M, N, 1]  no   (each lane is a row of its own)
+bool vectorsStayInConsumerRows(ReshapeIndexOp reshape) {
+  ViewSignatureAttr sig = reshape.getSpec().getSignature();
+  // A rank-0 shape is one row of one element.
+  auto innermost = [](MOSH::ShapeAttr shape) -> std::optional<int64_t> {
+    if (shape.getRank() == 0)
+      return 1;
+    return MOSH::ShapeAttr::getStaticDim(shape.getValues().back());
+  };
+  // `in` is the producer's shape, `out` the consumer's (the load's view).
+  std::optional<int64_t> producerRow = innermost(sig.getIn());
+  std::optional<int64_t> consumerRow = innermost(sig.getOut());
+  return producerRow && consumerRow && *producerRow > 0 && *consumerRow > 0 &&
+         *consumerRow % *producerRow == 0;
+}
+
+// Whether an op in `srcBody` other than `reshape` computes an index from the
+// loop index, as a broadcast, transpose or slice read does.
+bool computesIndexBesides(Block &srcBody, ReshapeIndexOp reshape) {
+  return srcBody
+      .walk([&](Operation *op) {
+        return op != reshape.getOperation() && computesIndex(op)
+                   ? WalkResult::interrupt()
+                   : WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
 // The block arg of the single `src` input that reads `dstResult`.
 BlockArgument fusedInputArg(IterElementwiseOp src, Value dstResult) {
   auto it = llvm::find(src.getInputs(), dstResult);
@@ -171,6 +209,19 @@ findFusibleEdge(IterOpaqueOp dst, const OutputFusionConfig &config) {
       if (!reshape)
         continue;
     }
+
+    // With the reshape on the store index, the body sees each vector's first
+    // element at the consumer's index and reads the lanes after it as the
+    // rest of that consumer row. A vector that runs past the row's end is
+    // still right for a read at the loop index itself, since the next row of
+    // a dense tensor follows on in memory. A read through any other index
+    // (e.g. a transposed or broadcast operand) would take those lanes from
+    // the wrong elements, or out of bounds. The kernel calls the epilogue at
+    // its own SIMD width, so the width can't be limited to keep vectors in
+    // their rows.
+    if (reshape && !vectorsStayInConsumerRows(reshape) &&
+        computesIndexBesides(srcBody, reshape))
+      continue;
 
     // A concat select can't go into the epilogue: the kernel calls it at its
     // own SIMD width, ignoring the select's width limit, so a vector could run
