@@ -82,6 +82,7 @@ class Linear(Module[[Tensor], Tensor]):
         *,
         bias: bool = True,
         quant_config: QuantConfig | None = None,
+        accum_dtype: DType | None = None,
     ):
         """Constructs a random linear transformation of the given dimensions.
 
@@ -94,12 +95,25 @@ class Linear(Module[[Tensor], Tensor]):
                 quantized weight. Only static per-tensor FP8 is supported: an
                 ``float8_e4m3fn`` weight with a ``weight_scale`` and an
                 ``input_scale``, which start as zeros.
+            accum_dtype: The dtype to keep the matmul result in while the
+                bias is added, before the result is cast to the input's
+                dtype. ``None`` keeps the result in the input's dtype, so a
+                ``bfloat16`` layer rounds once after the matmul and again
+                after the bias. ``DType.float32`` rounds once, as
+                ``torch.nn.functional.linear`` does.
 
         Raises:
             NotImplementedError: If ``quant_config`` is not static per-tensor
                 FP8.
+            ValueError: If both ``quant_config`` and ``accum_dtype`` are
+                given.
         """
+        if quant_config is not None and accum_dtype is not None:
+            raise ValueError(
+                "max.nn.Linear does not support accum_dtype with quant_config"
+            )
         self.quant_config = quant_config
+        self.accum_dtype = accum_dtype
         if quant_config is None:
             self.weight = random.normal([out_dim, in_dim])
         else:
@@ -134,6 +148,7 @@ class Linear(Module[[Tensor], Tensor]):
         yield "in_dim", self.in_dim
         yield "out_dim", self.out_dim
         yield "bias", isinstance(self.bias, Tensor), True
+        yield "accum_dtype", self.accum_dtype, None
 
     def forward(self, x: Tensor) -> Tensor:
         """Applies a linear transformation to the input tensor.
@@ -154,7 +169,13 @@ class Linear(Module[[Tensor], Tensor]):
                 y = y.rebind_mapping(_matmul_mapping(x, self.weight))
             return y + self.bias
         # Matmul needs one dtype; the input takes the weight's.
-        return x.cast(self.weight.dtype) @ self.weight.T + self.bias
+        x = x.cast(self.weight.dtype)
+        if self.accum_dtype is None:
+            return x @ self.weight.T + self.bias
+        y = F.matmul(x, self.weight.T, out_dtype=self.accum_dtype)
+        if isinstance(self.bias, Tensor):
+            y = y + self.bias.cast(self.accum_dtype)
+        return y.cast(x.dtype)
 
 
 def _matmul_mapping(x: Tensor, weight: Tensor) -> DeviceMapping:
